@@ -103,7 +103,7 @@ def load_raw_data(config):
         ]
         integer_features = []
         ClfTarget = "Species"    
-    
+        print(continuous_features)
     elif config["dataset"] == "banknote":
         data = pd.read_csv('../data/data_banknote_authentication.txt', header=None)
         data.columns = ["variance", "skewness", "curtosis", "entropy", "class"]

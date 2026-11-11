@@ -11,9 +11,10 @@ import torch
 import wandb
 import numpy as np
 
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 
-def train_function(config, model, train_z, optimizer, scheduler, device): 
+def train_function(config, model, train_z, llm_emb, optimizer, scheduler, device):
+    # llm_emb: 각 train_z 행에 대응하는 LLM 텍스트 임베딩 [N, llm_dim] (None이면 무조건부 학습)
     base_name = f"{config['dataset']}_{config['lr1']}_{config['d_token']}_{config['denoising_dim']}"
     base_name += f"_{config['batch_size1']}_{config['batch_size2']}_{config['max_beta']}"
     base_name += f"_{config['var']}_{config['lambda']}"
@@ -27,13 +28,20 @@ def train_function(config, model, train_z, optimizer, scheduler, device):
     
     num_epochs = config['epochs_2']
 
+    # (z, emb) 쌍이 같은 행끼리 배치로 묶이도록 TensorDataset 사용
+    if llm_emb is None:
+        llm_emb = torch.zeros(train_z.shape[0], 0)
+    llm_emb = torch.as_tensor(llm_emb).float()
+    assert llm_emb.shape[0] == train_z.shape[0], "llm_emb와 train_z의 행 수가 다릅니다"
+    use_cond = llm_emb.shape[1] > 0
+
     train_dataloader = DataLoader(
-        train_z,
+        TensorDataset(train_z, llm_emb),
         batch_size = config["batch_size2"],
         shuffle = True,
         num_workers = 4,
     )
-
+    print("train_z:", tuple(train_z.shape), "llm_emb:", tuple(llm_emb.shape))
     best_loss = float('inf')
     patience = 0
     for epoch in range(num_epochs):
@@ -42,9 +50,10 @@ def train_function(config, model, train_z, optimizer, scheduler, device):
         }
         batch_loss = 0.0
         len_input = 0
-        for batch in train_dataloader:
+        for batch, emb_batch in train_dataloader:
             inputs = batch.float().to(device)
-            loss = model(inputs)
+            emb_batch = emb_batch.to(device) if use_cond else None
+            loss = model(inputs, emb_batch)
         
             loss = loss.mean()
 

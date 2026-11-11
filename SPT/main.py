@@ -1,8 +1,19 @@
 #%%
 import os
+# LLM 토크나이저 사용 후 DataLoader worker를 fork할 때 나오는 경고/교착 방지
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 import argparse
 import importlib
+import sys
 
+# 작업 디렉토리를 이 스크립트가 있는 위치(uoscapstone/SPT/SPT)로 이동
+target_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() \
+    else '/gpfs/home1/mil090/uoscapstone/SPT/SPT'
+os.chdir(target_dir)
+if target_dir not in sys.path:
+    sys.path.insert(0, target_dir)
+
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -20,8 +31,8 @@ except:
     subprocess.run(["wandb", "login"], input=key[0], encoding='utf-8')
     import wandb
 
-project = "" # put your WANDB project name ### tabsyn_ours
-entity = "" # put your WANDB username
+project = "uos-capstone" # put your WANDB project name ### tabsyn_ours
+entity = "mil090-university-of-seoul" # put your WANDB username
 
 run = wandb.init(
     project=project, 
@@ -56,7 +67,7 @@ def get_args(debug):
                         help='Latent dimension')
     parser.add_argument('--num_layers', default=2, type=int,
                         help='The number of layer in transformer')
-    parser.add_argument('--epochs', default=4000, type=int,
+    parser.add_argument('--epochs', default=1, type=int,
                         help='Training epochs for stage 1') 
     parser.add_argument('--max_beta', type=float, default=1e-2, 
                         help='Maximum value of regularization weight')
@@ -81,18 +92,25 @@ def get_args(debug):
                         help='Training epochs for stage 2')
     parser.add_argument("--denoising_dim", default=1024, type=int,
                         help="Size of latent dimension for stage 2")
+    ### LLM 조건 임베딩
+    parser.add_argument("--llm_model", default="Qwen/Qwen2.5-0.5B-Instruct", type=str,
+                        help='HuggingFace decoder LLM used to embed text conditions')
+    parser.add_argument("--reuse_stage1", action="store_true",
+                        help='Skip VAE training and reuse saved stage1 .pth and train_z.npy (stage2만 재학습)')
     if debug:
         return parser.parse_args(args=[])
     else:
         return parser.parse_args()
 #%%
 def main():
-    config = vars(get_args(debug=False)) # default configuration
+    #%%
+    # 인터랙티브(#%% 셀) 실행이면 기본값, 스크립트 실행이면 CLI 인자 사용
+    config = vars(get_args(debug=hasattr(sys, 'ps1') or 'ipykernel' in sys.modules)) # default configuration
     set_random_seed(config['seed'])
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Current device is', device)
     wandb.config.update(config)
-    
+    #%%
     dataset_module = importlib.import_module(f"datasets.preprocess")
     importlib.reload(dataset_module)
 
@@ -101,14 +119,14 @@ def main():
         config, train=True)
     train_dataloader = DataLoader(
         train_dataset, batch_size=config['batch_size1'], shuffle=True)
-    
+    #%%    
     # Stage 1 (VAE) 
     model_module = importlib.import_module('modules.model1')
     importlib.reload(model_module)
-
+#%%
     config["d_numerical"] = train_dataset.num_continuous_features
     config['categories'] = train_dataset.num_categories # the number of unique value
-
+#%%
     model1 = model_module.Model_VAE(
         num_layers = config['num_layers'],  
         d_numerical = config["d_numerical"], 
@@ -126,20 +144,48 @@ def main():
     scheduler1 = ReduceLROnPlateau(optimizer1, mode='min', factor=0.95, patience=10)
     
     # Model Training
-    train_module1 = importlib.import_module('modules.train1')
-    importlib.reload(train_module1)
-    train_z = train_module1.train_function( 
-        model1,
-        train_dataset,
-        train_dataloader,
-        config,
-        optimizer1, 
-        scheduler1,
-        device
-    )
-
+    s1_base = f"{config['dataset']}_{config['lr1']}_{config['d_token']}_{config['denoising_dim']}"
+    s1_base += f"_{config['batch_size1']}_{config['batch_size2']}_{config['max_beta']}"
+    s1_base += f"_{config['var']}_{config['lambda']}"
+    s1_pth = f"./assets/models/{s1_base}/stage1_{s1_base}_{config['seed']}.pth"
+    s1_z = f"./assets/models/{s1_base}/{s1_base}_{config['seed']}_train_z.npy"
+    if config['reuse_stage1']:
+        assert os.path.exists(s1_pth) and os.path.exists(s1_z), \
+            f"--reuse_stage1: 저장된 stage1 결과가 없습니다 ({s1_pth}, {s1_z})"
+        print(f"[stage1] 학습 생략, 재사용: {s1_pth}")
+        model1.load_state_dict(torch.load(s1_pth, map_location=device))
+        train_z = np.load(s1_z)
+    else:
+        train_module1 = importlib.import_module('modules.train1')
+        importlib.reload(train_module1)
+        train_z = train_module1.train_function(
+            model1,
+            train_dataset,
+            train_dataloader,
+            config,
+            optimizer1,
+            scheduler1,
+            device
+        )
+    #%%
+    # LLM 조건 임베딩: 각 학습 행의 라벨 → 템플릿 문장 → LLM 임베딩 [N_train, llm_dim]
+    llm_module = importlib.import_module('modules.llm_embed')
+    importlib.reload(llm_module)
+    emb_base = f"{config['dataset']}_{config['lr1']}_{config['d_token']}_{config['denoising_dim']}"
+    emb_base += f"_{config['batch_size1']}_{config['batch_size2']}_{config['max_beta']}"
+    emb_base += f"_{config['var']}_{config['lambda']}"
+    emb_cache = f"./assets/models/{emb_base}/{emb_base}_{config['seed']}_llm_emb.npy"
+    embedder = llm_module.LLMEmbedder(config['llm_model'], device=device)
+    llm_emb = llm_module.build_train_embeddings(config, train_dataset, embedder, cache_path=emb_cache)
+    embedder.release()
+    del embedder
+    llm_emb = torch.tensor(llm_emb).float()
+    config['llm_dim'] = llm_emb.shape[1]
+    config['llm_centered'] = True  # 학습 평균 μ로 중심화된 임베딩 (추론도 같은 μ 사용)
+    print('llm_emb is formulated by size:', llm_emb.shape)
+    #%%
     train_z = torch.tensor(train_z).float()
-    print("<train_z.shape> : ",train_z.shape)
+    print("<train_z.shape> : ", train_z.shape)
 
     train_z = train_z[:, 1:, :]
     B, num_tokens, token_dim = train_z.size()
@@ -153,6 +199,7 @@ def main():
     denoise_fn = denoise_fn_module.MLPDiffusion(
         in_dim,
         config['denoising_dim'], ## fixed 1024
+        llm_dim=config['llm_dim'],  # LLM 임베딩 차원 → llm_proj로 denoising_dim에 맞춤
     ).to(device)
     denoise_fn.train()
     
@@ -180,6 +227,7 @@ def main():
         config,
         model2,
         train_z,
+        llm_emb,
         optimizer2,
         scheduler2,
         device,
@@ -216,6 +264,6 @@ def main():
 #%%
 if __name__ == '__main__':
     main()
-#%%
     
     
+# %%

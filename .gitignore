@@ -180,3 +180,5 @@ overleaf*
 *.zip
 workspace
 /example
+# 생성 결과물
+syn_data/

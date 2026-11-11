@@ -1,6 +1,65 @@
 # UOS-Capstone
 2026. 2학기 통계자료분석캡스톤디자인 주입식 학습 팀 리포지토리
 
+## 개요
+원하는 데이터를 자연어로 설명하면, 그 조건에 맞는 표 데이터만 생성하는 것이 목표입니다.
+[SPT](https://github.com/Optim-Lab/SPT)의 stage 2(diffusion denoiser)에 LLM 텍스트 임베딩을 조건으로 주입하는 방식입니다.
+
+```
+프롬프트 ─▶ 라벨 제약 해석 ─▶ LLM 임베딩(Qwen2.5-0.5B, 중심화) ─▶ diffusion 샘플링 ─▶ VAE 디코딩 ─▶ 표 데이터
+```
+
+- **학습**
+  - 각 행의 라벨로 템플릿 문장을 만들어요. 예: `A frog call recording of species …, genus …, family ….`
+  - 문장을 임베딩한 뒤 고유 문장들의 평균을 빼서 중심화해요. 그 임베딩을 `llm_proj`로 denoiser에 더해요.
+- **추론**
+  - 프롬프트에서 과·속·종 제약을 찾아요. 라벨 이름이나 한국어·영어 일반명은 규칙으로 찾고, 그 밖의 문장은 LLM이 해석해요.
+  - 제약에 맞는 학습 조합을 빈도에 비례해 샘플마다 골라 조건으로 넣어요.
+
+## 결과 (anuran, 2026-11-11)
+stage 1 1000 에폭, stage 2 3000 에폭(early stopping)으로 학습했어요. 프롬프트마다 5,756행을 생성했어요.
+
+| 프롬프트 | 해석된 조건 | 조합 일관성 | 제약 만족률 | 조건부 Coverage | Precision |
+| --- | --- | --- | --- | --- | --- |
+| A frog call recording of genus Hypsiboas. | Genus = Hypsiboas | 1.000 | 1.000 | 1.000 | 0.984 |
+| A frog call recording of genus Adenomera. | Genus = Adenomera | 1.000 | 1.000 | 1.000 | 0.997 |
+| 청개구리과 개구리 울음소리 데이터를 생성해 줘 | Family = Hylidae | 1.000 | 1.000 | 0.999 | 0.984 |
+
+- 조건부 Coverage와 Precision은 조건에 맞는 실제 train 데이터를 기준으로 계산했어요.
+- 생성된 종 비율은 학습 데이터 비율과 거의 같아요. 예: Hypsiboas 프롬프트에서 Cordobae 70.9%, Cinerascens 29.1%
+
+## 실행
+```bash
+cd SPT && mkdir -p logs
+sbatch run_full.sh   # 학습 + 프롬프트 3개 추론 (A10 1장, 약 27분)
+```
+직접 실행하려면 아래처럼 해요.
+```bash
+python main.py $COMMON --seed 0 --epochs 1000 --epochs_2 3000     # --reuse_stage1: 저장된 VAE 재사용
+python inference.py $COMMON --ver 0 --prompt "청개구리과 개구리 울음소리 데이터를 생성해 줘"
+python tools/check_recon.py $COMMON --seed 0                       # VAE 복원 정확도 진단
+```
+`$COMMON`은 `run_full.sh`에 정의된 하이퍼파라미터예요.
+
+### 결과 확인 위치
+- 범주 분포와 조건부 지표: `logs/`
+- 지표: wandb의 `cond/*`
+- 생성 데이터: `syn_data/`
+
+### 주요 파일
+- `SPT/modules/llm_embed.py`
+- `SPT/modules/model2.py`
+- `SPT/main.py`
+- `SPT/inference.py`
+
+## 한계와 다음 단계
+- 조건은 학습 데이터에 있는 라벨 조합으로만 표현돼요. 그래서 MFCC 같은 수치 조건이나 학습에 없는 조합은 반영되지 않아요.
+- 다음 단계
+  - 암기 여부 확인(DCR)
+  - 다른 데이터셋으로 확장
+  - 여러 seed로 반복 실험
+  - 더 큰 LLM으로 자유 문장 해석 비교
+
 ---
 
 > 아래는 원본 SPT 레포지토리([Optim-Lab/SPT](https://github.com/Optim-Lab/SPT))의 README입니다.

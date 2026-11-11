@@ -1,3 +1,10 @@
+# UOS-Capstone
+2026. 2학기 통계자료분석캡스톤디자인 주입식 학습 팀 리포지토리
+
+---
+
+> 아래는 원본 SPT 레포지토리([Optim-Lab/SPT](https://github.com/Optim-Lab/SPT))의 README입니다.
+
 # Generating High-Diversity Synthetic Tabular Data via a Less-Constrained Prior
 
 This is the official implementation of the paper  
